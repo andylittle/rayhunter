@@ -319,8 +319,9 @@ fn enable_frame_readwrite(fd: i32, mode: u32, configured_device: &Device) -> Dia
                 peripheral_mask: u32::MAX,
                 mode_param: 0,
             }];
-            if configured_device == &Device::Tplink {
-                // tplink M7350 HW revision 3-8 need this mode
+            if configured_device == &Device::Tplink || configured_device == &Device::Mw41 {
+                // tplink M7350 HW revision 3-8 need this mode; confirmed on-device that the
+                // MW41MP needs it too (its default peripheral_mask=u32::MAX attempt below fails).
                 try_params.insert(
                     0,
                     DiagLoggingModeParam {
@@ -332,6 +333,7 @@ fn enable_frame_readwrite(fd: i32, mode: u32, configured_device: &Device) -> Dia
             }
 
             let mut ret = 0;
+            let mut last_errno = std::io::Error::last_os_error();
 
             for params in &try_params {
                 let mut params = *params;
@@ -348,10 +350,14 @@ fn enable_frame_readwrite(fd: i32, mode: u32, configured_device: &Device) -> Dia
                 if ret == 0 {
                     break;
                 }
+                last_errno = std::io::Error::last_os_error();
+                debug!("DIAG_IOCTL_SWITCH_LOGGING attempt with {params:?} failed: {last_errno}");
             }
 
             if ret < 0 {
-                let msg = format!("DIAG_IOCTL_SWITCH_LOGGING ioctl failed with error code {ret}");
+                let msg = format!(
+                    "DIAG_IOCTL_SWITCH_LOGGING ioctl failed with error code {ret} (errno={last_errno:?})"
+                );
                 return Err(DiagDeviceError::InitializationFailed(msg));
             }
         }

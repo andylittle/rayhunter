@@ -253,6 +253,11 @@ async fn run_with_config(
             Device::Wingtech => display::wingtech::update_ui,
             Device::Pinephone => display::headless::update_ui,
             Device::Uz801 => display::uz801::update_ui,
+            // The MW41MP's status LEDs are actively repainted by the stock firmware
+            // (likely QCMAP_ConnectionManager) within a few seconds of any manual write,
+            // so there's currently no LED that holds a value rayhunter sets. Headless
+            // until a way to disable that vendor polling turns up.
+            Device::Mw41 => display::headless::update_ui,
         };
         update_ui(&task_tracker, &config, shutdown_token.clone(), ui_update_rx);
 
