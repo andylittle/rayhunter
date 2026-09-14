@@ -76,7 +76,7 @@ Devices](./supported-devices.md).
 
 A lot of devices run a trimmed down version of Android and have ADB (Android
 Debug Bridge) support. The USB-based installers (`orbic-usb`, `pinephone`,
-`uz801`) use ADB to perform the installation.
+`uz801`, `mw41`) use ADB to perform the installation.
 
 You might want to install and use actual ADB to connect to the device, push
 files and generally poke around. The installer contains some tools to enable ADB:

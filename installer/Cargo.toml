@@ -32,6 +32,9 @@ tokio = { version = "1.44.2", features = ["io-util", "io-std", "macros", "rt"], 
 tokio-retry2 = "0.5.7"
 tokio-stream = "0.1.17"
 futures = "0.3"
+
+# Only used by the MW41MP installer, and scsir only has Linux and Windows backends anyway.
+[target.'cfg(target_os = "linux")'.dependencies]
 scsir = "0.3.0"
 
 [target.'cfg(unix)'.dependencies]

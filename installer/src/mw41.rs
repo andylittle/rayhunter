@@ -16,7 +16,7 @@
 use std::time::Duration;
 
 use adb_client::{ADBDeviceExt, ADBUSBDevice, RustADBError};
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use tokio::time::sleep;
 
 use crate::Mw41Args as Args;
@@ -24,12 +24,7 @@ use crate::RAYHUNTER_DAEMON_INIT;
 use crate::output::{eprintln, print, println};
 
 const MW41_VENDOR_ID: u16 = 0x1bbb;
-const MW41_NORMAL_PRODUCT_ID: u16 = 0x0195;
 const MW41_DEBUG_PRODUCT_ID: u16 = 0x0196;
-
-/// The SCSI CDB that switches the device into debug mode. Publicly documented since 2021
-/// (Alex Studer / jtanx/LinkZoneRoot); the same command TCL's own factory tool sends.
-const DEBUG_MODE_CDB: [u8; 16] = [0x16, 0xf9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 pub async fn install(
     Args {
@@ -38,11 +33,11 @@ pub async fn install(
     }: Args,
 ) -> Result<()> {
     print!("Looking for the device... ");
-    activate_debug_mode()?;
+    let switched = activate_debug_mode()?;
     println!("ok");
 
     print!("Waiting for ADB connection... ");
-    let mut adb_device = wait_for_adb().await?;
+    let mut adb_device = wait_for_adb(switched).await?;
     println!("ok");
 
     print!("Checking for a microSD card... ");
@@ -67,31 +62,26 @@ pub async fn install(
     Ok(())
 }
 
-/// Send the debug-mode SCSI command if the device isn't already in debug mode.
-#[cfg(target_os = "linux")]
-fn activate_debug_mode() -> Result<()> {
-    match find_mw41_usb_device()? {
-        Mw41UsbState::AlreadyInDebugMode => Ok(()),
-        Mw41UsbState::NormalMode(block_device) => {
-            use scsir::Scsi;
-
-            let scsi = Scsi::new(&block_device).map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to open {} for the SCSI command: {e}",
-                    block_device.display()
-                )
-            })?;
-            scsi.issue(&DebugModeSwitchCommand)
-                .map_err(|e| anyhow::anyhow!("Failed to send the debug-mode SCSI command: {e}"))?;
-            // The device takes a couple of seconds to re-enumerate as adbd starts.
-            std::thread::sleep(Duration::from_secs(2));
-            Ok(())
-        }
-    }
+/// Switch the device into debug mode and open an interactive ADB shell.
+pub async fn shell() -> Result<()> {
+    let switched = activate_debug_mode()?;
+    let mut adb_device = wait_for_adb(switched).await?;
+    adb_device.shell(&mut std::io::stdin(), Box::new(std::io::stdout()))?;
+    Ok(())
 }
 
+/// Just switch the device into debug mode, without doing anything else.
+pub fn start_adb() -> Result<()> {
+    activate_debug_mode().map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+use linux::activate_debug_mode;
+
+/// Sending the SCSI command needs a raw passthrough ioctl on the mass-storage block device,
+/// which is only implemented for Linux so far.
 #[cfg(not(target_os = "linux"))]
-fn activate_debug_mode() -> Result<()> {
+fn activate_debug_mode() -> Result<bool> {
     bail!(
         "Automated MW41MP installation is currently only supported on Linux. On other \
          platforms, send the debug-mode SCSI command manually (see doc/mw41.md), then re-run \
@@ -99,125 +89,16 @@ fn activate_debug_mode() -> Result<()> {
     );
 }
 
-#[cfg(target_os = "linux")]
-enum Mw41UsbState {
-    /// Not yet switched. Holds the path to the mass-storage block device (e.g. /dev/sdb).
-    NormalMode(std::path::PathBuf),
-    AlreadyInDebugMode,
-}
-
-/// Scan connected USB mass-storage block devices for the MW41MP, identified by its USB
-/// vendor/product ID. Returns an error if none or more than one candidate is found -- in the
-/// latter case the user likely has another Alcatel/TCL device plugged in, since this exact
-/// VID:PID pair isn't unique to the MW41MP.
-#[cfg(target_os = "linux")]
-fn find_mw41_usb_device() -> Result<Mw41UsbState> {
-    use std::fs;
-
-    let mut already_in_debug_mode = false;
-    let mut candidates = Vec::new();
-
-    for entry in fs::read_dir("/sys/block").context("Failed to read /sys/block")? {
-        let entry = entry?;
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        // Only consider things that look like SCSI/USB disks, to avoid e.g. loop devices.
-        if !name.starts_with("sd") {
-            continue;
-        }
-
-        let device_link = entry.path().join("device");
-        let Ok(device_path) = fs::canonicalize(&device_link) else {
-            continue;
-        };
-
-        let Some((vendor_id, product_id)) = find_usb_ids(&device_path) else {
-            continue;
-        };
-
-        if vendor_id != MW41_VENDOR_ID {
-            continue;
-        }
-
-        if product_id == MW41_NORMAL_PRODUCT_ID {
-            candidates.push(std::path::PathBuf::from("/dev").join(name));
-        } else if product_id == MW41_DEBUG_PRODUCT_ID {
-            already_in_debug_mode = true;
-        }
-    }
-
-    if already_in_debug_mode {
-        return Ok(Mw41UsbState::AlreadyInDebugMode);
-    }
-
-    match candidates.len() {
-        0 => bail!(
-            "No MW41MP found on USB. Make sure it's plugged in via USB and fully booted \
-             (WiFi network visible)."
-        ),
-        1 => Ok(Mw41UsbState::NormalMode(candidates.remove(0))),
-        _ => bail!(
-            "Found more than one matching USB device ({candidates:?}). The MW41MP's USB ID \
-             isn't unique to it -- please unplug any other Alcatel/TCL USB devices and try again."
-        ),
-    }
-}
-
-/// Walk up from a USB device's sysfs path to find the nearest ancestor exposing
-/// `idVendor`/`idProduct` (the actual USB device node, as opposed to one of its interfaces).
-#[cfg(target_os = "linux")]
-fn find_usb_ids(device_path: &std::path::Path) -> Option<(u16, u16)> {
-    for ancestor in device_path.ancestors() {
-        let vendor = std::fs::read_to_string(ancestor.join("idVendor")).ok();
-        let product = std::fs::read_to_string(ancestor.join("idProduct")).ok();
-        if let (Some(vendor), Some(product)) = (vendor, product) {
-            let vendor_id = u16::from_str_radix(vendor.trim(), 16).ok()?;
-            let product_id = u16::from_str_radix(product.trim(), 16).ok()?;
-            return Some((vendor_id, product_id));
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-struct DebugModeSwitchCommand;
-
-#[cfg(target_os = "linux")]
-impl scsir::Command for DebugModeSwitchCommand {
-    type CommandBuffer = [u8; 16];
-    type DataBuffer = ();
-    type DataBufferWrapper = ();
-    type ReturnType = scsir::Result<()>;
-
-    fn direction(&self) -> scsir::DataDirection {
-        scsir::DataDirection::None
-    }
-
-    fn command(&self) -> Self::CommandBuffer {
-        DEBUG_MODE_CDB
-    }
-
-    fn data(&self) -> Self::DataBufferWrapper {}
-
-    fn data_size(&self) -> u32 {
-        0
-    }
-
-    fn process_result(
-        &self,
-        result: scsir::ResultData<Self::DataBufferWrapper>,
-    ) -> Self::ReturnType {
-        result.check_ioctl_error()?;
-        result.check_common_error()?;
-        Ok(())
-    }
-}
-
-async fn wait_for_adb() -> Result<ADBUSBDevice> {
+/// Poll for the device's ADB interface. `just_switched` is true if we sent the debug-mode
+/// command a moment ago, in which case the device is still re-enumerating and we give it a
+/// couple of seconds before the first attempt.
+async fn wait_for_adb(just_switched: bool) -> Result<ADBUSBDevice> {
     const MAX_ATTEMPTS: u32 = 30;
     let mut attempts = 0;
+
+    if just_switched {
+        sleep(Duration::from_secs(2)).await;
+    }
 
     loop {
         if attempts >= MAX_ATTEMPTS {
@@ -234,7 +115,10 @@ async fn wait_for_adb() -> Result<ADBUSBDevice> {
                 }
             }
             Err(RustADBError::DeviceNotFound(_)) => {}
-            Err(e) => bail!("ADB connection error: {e}"),
+            Err(e) => bail!(
+                "ADB connection error: {e}. If a host `adb` server is running, stop it with \
+                 `adb kill-server` and try again."
+            ),
         }
 
         sleep(Duration::from_secs(1)).await;
@@ -293,7 +177,12 @@ fn install_rayhunter_files(
         .rsplit_once('/')
         .map(|(dir, _)| dir)
         .unwrap_or(qmdl_store_path);
-    adb_device.shell_command(&["mkdir", "-p", "/cache/rayhunter", qmdl_dir], &mut buf)?;
+    if !shell_test(adb_device, &["mkdir", "-p", "/cache/rayhunter", qmdl_dir])? {
+        bail!(
+            "Failed to create {qmdl_dir}. If this is on the microSD card, check that the card \
+             isn't write-protected or corrupted."
+        );
+    }
 
     let config_path = "/cache/rayhunter/config.toml";
     let config_exists = shell_test(adb_device, &["test", "-f", config_path])?;
@@ -356,17 +245,159 @@ fn install_startup_script(adb_device: &mut ADBUSBDevice) -> Result<()> {
     Ok(())
 }
 
-/// Switch the device into debug mode and open an interactive ADB shell.
-pub async fn shell() -> Result<()> {
-    activate_debug_mode()?;
-    let mut adb_device = wait_for_adb().await?;
-    adb_device.shell(&mut std::io::stdin(), Box::new(std::io::stdout()))?;
-    Ok(())
-}
+/// Everything involved in finding the device's USB mass-storage block device and sending it
+/// the debug-mode SCSI command. Linux-only: it relies on sysfs to map block devices back to
+/// their USB IDs, and on the `SG_IO` passthrough ioctl (via the `scsir` crate).
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::fs;
+    use std::path::{Path, PathBuf};
 
-/// Just switch the device into debug mode, without doing anything else.
-pub fn start_adb() -> Result<()> {
-    activate_debug_mode()
+    use anyhow::{Context, Result, bail};
+    use scsir::Scsi;
+
+    use super::{MW41_DEBUG_PRODUCT_ID, MW41_VENDOR_ID};
+
+    const MW41_NORMAL_PRODUCT_ID: u16 = 0x0195;
+
+    /// The SCSI CDB that switches the device into debug mode. Publicly documented since 2021
+    /// (Alex Studer / jtanx/LinkZoneRoot); the same command TCL's own factory tool sends.
+    const DEBUG_MODE_CDB: [u8; 16] = [0x16, 0xf9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    enum Mw41UsbState {
+        /// Not yet switched. Holds the path to the mass-storage block device (e.g. /dev/sdb).
+        NormalMode(PathBuf),
+        /// Already switched; the device keeps its mass-storage interface in this mode too, so
+        /// it's still visible under /sys/block, just with the debug-mode product ID.
+        AlreadyInDebugMode,
+    }
+
+    /// Send the debug-mode SCSI command if the device isn't already in debug mode. Returns
+    /// true if the command was sent (and the device is now re-enumerating), false if it was
+    /// already in debug mode.
+    pub(super) fn activate_debug_mode() -> Result<bool> {
+        match find_mw41_usb_device()? {
+            Mw41UsbState::AlreadyInDebugMode => Ok(false),
+            Mw41UsbState::NormalMode(block_device) => {
+                let scsi = Scsi::new(&block_device).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to open {} for the SCSI command: {e}. Sending it needs raw \
+                         access to the block device, so run the installer with sudo.",
+                        block_device.display()
+                    )
+                })?;
+                scsi.issue(&DebugModeSwitchCommand).map_err(|e| {
+                    anyhow::anyhow!("Failed to send the debug-mode SCSI command: {e}")
+                })?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// Scan connected USB mass-storage block devices for the MW41MP, identified by its USB
+    /// vendor/product ID. Returns an error if none or more than one candidate is found -- in
+    /// the latter case the user likely has another Alcatel/TCL device plugged in, since this
+    /// exact VID:PID pair isn't unique to the MW41MP.
+    fn find_mw41_usb_device() -> Result<Mw41UsbState> {
+        let mut already_in_debug_mode = false;
+        let mut candidates = Vec::new();
+
+        for entry in fs::read_dir("/sys/block").context("Failed to read /sys/block")? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            // Only consider things that look like SCSI/USB disks, to avoid e.g. loop devices.
+            if !name.starts_with("sd") {
+                continue;
+            }
+
+            let device_link = entry.path().join("device");
+            let Ok(device_path) = fs::canonicalize(&device_link) else {
+                continue;
+            };
+
+            let Some((vendor_id, product_id)) = find_usb_ids(&device_path) else {
+                continue;
+            };
+
+            if vendor_id != MW41_VENDOR_ID {
+                continue;
+            }
+
+            if product_id == MW41_NORMAL_PRODUCT_ID {
+                candidates.push(PathBuf::from("/dev").join(name));
+            } else if product_id == MW41_DEBUG_PRODUCT_ID {
+                already_in_debug_mode = true;
+            }
+        }
+
+        if already_in_debug_mode {
+            return Ok(Mw41UsbState::AlreadyInDebugMode);
+        }
+
+        match candidates.len() {
+            0 => bail!(
+                "No MW41MP found on USB. Make sure it's plugged in via USB and fully booted \
+                 (WiFi network visible)."
+            ),
+            1 => Ok(Mw41UsbState::NormalMode(candidates.remove(0))),
+            _ => bail!(
+                "Found more than one matching USB device ({candidates:?}). The MW41MP's USB ID \
+                 isn't unique to it -- please unplug any other Alcatel/TCL USB devices and try \
+                 again."
+            ),
+        }
+    }
+
+    /// Walk up from a USB device's sysfs path to find the nearest ancestor exposing
+    /// `idVendor`/`idProduct` (the actual USB device node, as opposed to one of its
+    /// interfaces).
+    fn find_usb_ids(device_path: &Path) -> Option<(u16, u16)> {
+        for ancestor in device_path.ancestors() {
+            let vendor = fs::read_to_string(ancestor.join("idVendor")).ok();
+            let product = fs::read_to_string(ancestor.join("idProduct")).ok();
+            if let (Some(vendor), Some(product)) = (vendor, product) {
+                let vendor_id = u16::from_str_radix(vendor.trim(), 16).ok()?;
+                let product_id = u16::from_str_radix(product.trim(), 16).ok()?;
+                return Some((vendor_id, product_id));
+            }
+        }
+        None
+    }
+
+    struct DebugModeSwitchCommand;
+
+    impl scsir::Command for DebugModeSwitchCommand {
+        type CommandBuffer = [u8; 16];
+        type DataBuffer = ();
+        type DataBufferWrapper = ();
+        type ReturnType = scsir::Result<()>;
+
+        fn direction(&self) -> scsir::DataDirection {
+            scsir::DataDirection::None
+        }
+
+        fn command(&self) -> Self::CommandBuffer {
+            DEBUG_MODE_CDB
+        }
+
+        fn data(&self) -> Self::DataBufferWrapper {}
+
+        fn data_size(&self) -> u32 {
+            0
+        }
+
+        fn process_result(
+            &self,
+            result: scsir::ResultData<Self::DataBufferWrapper>,
+        ) -> Self::ReturnType {
+            result.check_ioctl_error()?;
+            result.check_common_error()?;
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]

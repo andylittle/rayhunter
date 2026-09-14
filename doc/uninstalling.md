@@ -39,3 +39,16 @@ busybox vi /system/bin/initmifiservice.sh
 Then type 999G (shift+g), then type dd. Then press the colon key (:) and type wq. Finally, press Enter.
 4. Lastly, run `setprop persist.sys.usb.config rndis`.
 5. Type `reboot` to reboot the device.
+
+## Alcatel LinkZone MW41MP
+
+0. (Optional): Back up the qmdl folder with all of the captures:
+`adb pull /media/card/rayhunter/qmdl .`
+1. Run `./installer util mw41-shell` to get a root shell on the device
+2. Remove the rayhunter files and init script:
+```sh
+rm -rf /cache/rayhunter /media/card/rayhunter /etc/init.d/rayhunter_daemon /etc/rc5.d/S99rayhunter_daemon
+reboot
+```
+
+Debug mode doesn't persist across a reboot, so the device is back to stock once it comes up.

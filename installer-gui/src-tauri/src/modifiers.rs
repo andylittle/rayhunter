@@ -139,7 +139,10 @@ mod tests {
 
     /// Lists the subcommands that are purposefully excluded from subcommand_modifiers().
     fn excluded_subcommands() -> Vec<&'static str> {
-        vec!["util"]
+        // mw41 is excluded for now because switching the device into debug mode needs raw
+        // access to its USB block device, which means running as root -- something the GUI
+        // installer doesn't do.
+        vec!["util", "mw41"]
     }
 
     /// Lists the arguments that are purposefully excluded from subcommand_modifiers(). Items in the
