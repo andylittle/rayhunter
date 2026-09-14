@@ -22,6 +22,7 @@
   - [Tmobile TMOHS1](./tmobile-tmohs1.md)
   - [UZ801](./uz801.md)
   - [Wingtech CT2MHS01](./wingtech-ct2mhs01.md)
+  - [Alcatel LinkZone MW41MP](./mw41.md)
   - [PinePhone and PinePhone Pro](./pinephone.md)
   - [Moxee Hotspot](./moxee.md)
 - [REST API Documentation](./api-docs.md)

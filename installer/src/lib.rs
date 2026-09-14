@@ -13,6 +13,8 @@ pub(crate) use files::*;
 
 mod moxee;
 #[cfg(not(target_os = "android"))]
+mod mw41;
+#[cfg(not(target_os = "android"))]
 mod orbic;
 mod orbic_auth;
 mod orbic_network;
@@ -53,6 +55,9 @@ enum Command {
     Orbic(OrbicNetworkArgs),
     /// Install rayhunter on the Moxee Hotspot via network.
     Moxee(MoxeeArgs),
+    /// Install rayhunter on the Alcatel LinkZone MW41MP.
+    #[cfg(not(target_os = "android"))]
+    Mw41(Mw41Args),
     /// Install rayhunter on the TMobile TMOHS1.
     Tmobile(TmobileArgs),
     /// Install rayhunter on the Uz801.
@@ -161,6 +166,18 @@ struct MoxeeArgs {
 struct InstallPinephone {}
 
 #[derive(Parser, Debug)]
+struct Mw41Args {
+    /// Overwrite config.toml even if it already exists on the device.
+    #[arg(long)]
+    reset_config: bool,
+
+    /// Store recordings in /cache instead of requiring a microSD card. Not recommended: /cache
+    /// only has a few tens of MB free, enough for a few hours of recording at most.
+    #[arg(long)]
+    skip_sdcard: bool,
+}
+
+#[derive(Parser, Debug)]
 struct Util {
     #[command(subcommand)]
     command: UtilSubCommand,
@@ -182,6 +199,12 @@ enum UtilSubCommand {
     /// Root the Uz801 and launch adb.
     #[cfg(not(target_os = "android"))]
     Uz801StartAdb(Uz801Args),
+    /// Switch the MW41MP into debug mode and launch adb.
+    #[cfg(not(target_os = "android"))]
+    Mw41StartAdb,
+    /// Switch the MW41MP into debug mode and open an interactive shell.
+    #[cfg(not(target_os = "android"))]
+    Mw41Shell,
     /// Root the tplink and launch telnetd.
     TplinkStartTelnet(TplinkStartTelnet),
     /// Root the TP-Link and open an interactive shell.
@@ -290,6 +313,8 @@ async fn run(args: Args) -> Result<(), Error> {
         Command::OrbicUsb(args) => orbic::install(args.reset_config).await.context("\nFailed to install rayhunter on the Orbic RC400L (USB installer)")?,
         Command::Orbic(args) => orbic_network::install(args.admin_ip, args.admin_username, args.admin_password, args.reset_config, args.data_dir).await.context("\nFailed to install rayhunter on the Orbic RC400L")?,
         Command::Moxee(args) => moxee::install(args).await.context("\nFailed to install rayhunter on the Moxee Hotspot")?,
+        #[cfg(not(target_os = "android"))]
+        Command::Mw41(args) => mw41::install(args).await.context("\nFailed to install rayhunter on the Alcatel LinkZone MW41MP")?,
         Command::Wingtech(args) => wingtech::install(args).await.context("\nFailed to install rayhunter on the Wingtech CT2MHS01")?,
         Command::Util(subcommand) => {
             match subcommand.command {
@@ -319,6 +344,10 @@ async fn run(args: Args) -> Result<(), Error> {
             UtilSubCommand::TmobileStartAdb(args) => wingtech::start_adb(&args.admin_ip, &args.admin_password).await.context("\nFailed to start adb on the Tmobile TMOHS1")?,
             #[cfg(not(target_os = "android"))]
             UtilSubCommand::Uz801StartAdb(args) => uz801::activate_usb_debug(&args.admin_ip).await.context("\nFailed to activate USB debug on the Uz801")?,
+            #[cfg(not(target_os = "android"))]
+            UtilSubCommand::Mw41StartAdb => mw41::start_adb().context("\nFailed to switch the MW41MP into debug mode")?,
+            #[cfg(not(target_os = "android"))]
+            UtilSubCommand::Mw41Shell => mw41::shell().await.context("\nFailed to open shell on the MW41MP")?,
             UtilSubCommand::TplinkStartTelnet(options) => {
                 tplink::start_telnet(&options.admin_ip).await?;
             }
